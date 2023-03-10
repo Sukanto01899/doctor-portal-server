@@ -2,7 +2,9 @@ const express = require('express');
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const app = express();
 const cors = require('cors');
-const jwt = require('jsonwebtoken')
+const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+const postmarkTransport = require('nodemailer-postmark-transport')
 require('dotenv').config();
 const port = process.env.port || 5000
 app.use(cors());
@@ -24,6 +26,37 @@ const verifyJWT = (req, res, next)=>{
     })
 }
 
+const mailTransport = nodemailer.createTransport(postmarkTransport({
+    auth: {
+      apiKey: process.env.EMAIL_SENDER_KEY
+    }
+  }))
+
+const sendAppointmentEmail =async (booking)=>{
+    console.log('inside sendAppointmentEmail', booking)
+    const {patient, patientName, treatment, date, slot} = booking;
+
+    const mailOptions = {
+        from: 'markerter@dm-ahsan.com',
+        to: `${patient}`,
+        subject: `Appointment booked for ${treatment}`,
+        text: `Appointment booked for ${treatment}`,
+        html: `<div>
+            <h1>Hello! you have new appointment</h1>
+            <pre>
+            Name: ${patientName},
+            Treatment: ${treatment},
+            Date: ${date},
+            slot: ${slot}
+            </pre>
+        </div>`
+      }
+
+    return mailTransport.sendMail(mailOptions)
+    .then(() => console.log('Email sent successfully!'))
+    .catch((error) => console.error('There was an error while sending the email:', error))
+}
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.ntymkpq.mongodb.net/?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true, serverApi: ServerApiVersion.v1 });
 
@@ -34,6 +67,18 @@ async function run(){
         const services = database.collection('services');
         const bookings = database.collection('bookings');
         const users = database.collection('users')
+        const doctors = database.collection('doctors')
+
+        // Verify Admin middleware
+        const verifyAdmin = async(req, res, next)=>{
+            const requestor = req.decoded.email;
+            const requestorAccount = await users.findOne({email: requestor});
+            if(requestorAccount.role === 'admin'){
+                next()
+            }else{
+                res.status(403).send({message: 'Forbidden'})
+            }
+        }
 
         app.get('/', (req, res)=>{
             res.send('Doctor portal')
@@ -41,7 +86,7 @@ async function run(){
 
         app.get('/services',async (req, res)=>{
             const query = {};
-            const cursor = services.find(query);
+            const cursor = services.find({}).project({name: 1})
             const all_services =await cursor.toArray();
             res.send(all_services)
         })
@@ -53,7 +98,9 @@ async function run(){
             if(exist){
                 return res.send({success: false, exist})
             }
-            const result = await bookings.insertOne(booking);  
+            const result = await bookings.insertOne(booking);
+            console.log('inside service api', result)
+            sendAppointmentEmail(booking) 
             res.send({success:true, result})
             
         })
@@ -115,21 +162,14 @@ async function run(){
             res.send(allUser)
         })
 
-        app.put('/user/admin/:email', verifyJWT, async (req, res)=>{
+        app.put('/user/admin/:email', verifyJWT, verifyAdmin, async (req, res)=>{
             const email = req.params.email;
-            const requestor = req.decoded.email;
-            const requestorAccount = await users.findOne({email: requestor});
-            if(requestorAccount.role === 'admin'){
                 const filter = {email: email};
                 const updateDoc = {
                 $set: {role: 'admin'}
                 }
                 const result = await users.updateOne(filter, updateDoc);
                 res.send(result)
-            }
-            else{
-                res.status(403).send({message: 'Forbidden'})
-            }
             
         })
 
@@ -138,6 +178,24 @@ async function run(){
             const user = await users.findOne({email: email});
             const isAdmin = user.role === 'admin';
             res.send({admin: isAdmin})
+        })
+
+        app.post('/doctor',verifyJWT,verifyAdmin, async (req, res)=>{
+            const doctor = req.body;
+            const result = await doctors.insertOne(doctor);
+            res.send(result)
+        })
+
+        app.get('/doctors',verifyJWT, verifyAdmin, async (req, res)=>{
+            const allDoctor = await doctors.find().toArray()
+            res.send(allDoctor)
+        })
+
+        app.delete('/doctors/:email',verifyJWT, verifyAdmin, async (req, res)=>{
+            const email = req.params.email;
+            const query = {email:email}
+            const result = await doctors.deleteOne(query);
+            res.send(result)
         })
     }
     finally{}
